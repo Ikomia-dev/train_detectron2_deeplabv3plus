@@ -106,14 +106,8 @@ class Detectron2_DeepLabV3Plus_TrainProcess(dnntrain.TrainProcess):
 
         if len(input.data["images"])>0:
 
-            param.epochs = int(param.maxIter * param.batch_size / len(input.data["images"]))
-
-            if input.has_bckgnd_class==False:
-                input.data["metadata"]["category_names"]={k+1:v for k,v in input.data["metadata"]["category_names"].items() }
-                input.data["metadata"]["category_names"][0] = "background"
-
+            param.epochs = int(param.maxIter / param.batch_size / len(input.data["images"]))
             param.classes = len(input.data["metadata"]["category_names"])
-
             param.model_name = "DeepLabV3Plus"
             # Call beginTaskRun for initialization
             self.beginTaskRun()

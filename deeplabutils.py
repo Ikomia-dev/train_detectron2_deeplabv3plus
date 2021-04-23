@@ -33,17 +33,13 @@ def my_dataset_function(ikDataset):
             category_colors[i]=c
     else:
         category_colors = None
-
     def f():
-        possible_masks = ["semantic_seg_masks_file","instance_seg_masks_file"]
         listDict = []
         for ikrecord in ikDataset["images"]:
             record={}
-            record["image_id"] = ikrecord["image_id"]
+            record["id"] = ikrecord["id"]
             record["file_name"] =ikrecord["filename"]
-            for possible in possible_masks:
-                if possible in ikrecord:
-                    record["sem_seg_file_name"] = ikrecord[possible]
+            record["sem_seg_file_name"] = ikrecord["semantic_seg_masks_file"]
             record["height"]=ikrecord["height"]
             record["width"]=ikrecord["width"]
             if category_colors is not None:
@@ -151,6 +147,7 @@ class MyTrainer(DefaultTrainer):
         self.train_process=train_process
         super().__init__(cfg)
 
+
     def build_lr_scheduler(cls, cfg, optimizer):
         return build_deeplab_lr_scheduler(cfg, optimizer)
 
@@ -230,6 +227,7 @@ class MySemSegEvaluator(SemSegEvaluator):
                 if "category_colors" in input:
                     gt = rgb2mask(gt, input["category_colors"]).astype(dtype=np.uint8)
 
+
             gt[gt == self._ignore_label] = self._num_classes
 
             self._conf_matrix += np.bincount(
@@ -266,17 +264,18 @@ class MyMapper(DatasetMapper):
         image = utils.read_image(dataset_dict["file_name"], format=self.image_format)
         utils.check_image_size(dataset_dict, image)
         # USER: Remove if you don't do semantic/panoptic segmentation.
-
         if "sem_seg_file_name" in dataset_dict:
             if "category_colors" in dataset_dict:
                 sem_seg_gt = utils.read_image(dataset_dict.pop("sem_seg_file_name"), "RGB")
                 sem_seg_gt = rgb2mask(sem_seg_gt, dataset_dict["category_colors"])
-            else :
+
+            else:
                 sem_seg_gt = utils.read_image(dataset_dict.pop("sem_seg_file_name"), "L")
                 sem_seg_gt = sem_seg_gt.squeeze(2)
 
-        else :
-            sem_seg_gt=None
+
+        else:
+            sem_seg_gt = None
 
         aug_input = T.AugInput(image, sem_seg=sem_seg_gt)
         transforms = self.augmentations(aug_input)
