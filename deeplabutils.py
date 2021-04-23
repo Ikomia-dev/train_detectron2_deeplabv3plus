@@ -1,7 +1,6 @@
 import numpy as np
-
-from detectron2.engine import DefaultTrainer
 import torch
+from detectron2.engine import DefaultTrainer
 from detectron2.projects.deeplab.build_solver import build_lr_scheduler as build_deeplab_lr_scheduler
 import detectron2.data.transforms as T
 from detectron2.data import DatasetMapper
@@ -42,8 +41,9 @@ def my_dataset_function(ikDataset):
             record["sem_seg_file_name"] = ikrecord["semantic_seg_masks_file"]
             record["height"]=ikrecord["height"]
             record["width"]=ikrecord["width"]
+            print(category_colors)
             if category_colors is not None:
-                record["category_colors"]={v: k for k, v in category_colors.items()}
+                record["category_colors"]={tuple(v): k for k, v in category_colors.items()}
             listDict.append(record)
         return listDict
     return f
@@ -64,81 +64,10 @@ def rgb2mask(img, color2index):
 
     return mask
 
-class LossEvalHook(HookBase):
-    def __init__(self, eval_period, model, data_loader, trainer, train_process, patience):
-        self._model = model
-        self._period = eval_period
-        self._data_loader = data_loader
-        self.best_val_loss= np.inf
-        self.patience = patience
-        self.waiting = 0
-        self.trainer=trainer
-        self.train_process=train_process
 
-    def _do_loss_eval(self):
-        # Copying inference_on_dataset from evaluator.py
-        total = len(self._data_loader)
-        num_warmup = min(5, total - 1)
-
-        start_time = time.perf_counter()
-        total_compute_time = 0
-        losses = []
-        for idx, inputs in enumerate(self._data_loader):
-            if idx == num_warmup:
-                start_time = time.perf_counter()
-                total_compute_time = 0
-            start_compute_time = time.perf_counter()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            total_compute_time += time.perf_counter() - start_compute_time
-            iters_after_start = idx + 1 - num_warmup * int(idx >= num_warmup)
-            seconds_per_img = total_compute_time / iters_after_start
-            if idx >= num_warmup * 2 or seconds_per_img > 5:
-                total_seconds_per_img = (time.perf_counter() - start_time) / iters_after_start
-                eta = datetime.timedelta(seconds=int(total_seconds_per_img * (total - idx - 1)))
-                log_every_n_seconds(
-                    logging.INFO,
-                    "Loss on Validation  done {}/{}. {:.4f} s / img. ETA={}".format(
-                        idx + 1, total, seconds_per_img, str(eta)
-                    ),
-                    n=5,
-                )
-            loss_batch = self._get_loss(inputs)
-            losses.append(loss_batch)
-        mean_loss = np.mean(losses)
-        if mean_loss<self.best_val_loss:
-            self.best_val_loss=mean_loss
-            self.waiting=0
-        self.waiting+=1
-
-        self.trainer.storage.put_scalar('validation_loss', mean_loss)
-
-        metrics_dict = {k:v[0] for k,v in self.trainer.storage.latest().items()}
-        self.train_process.log_metrics(metrics_dict, self.trainer.iter)
-
-        if self.waiting>self.patience and self.patience>=0:
-            self.trainer.run=False
-        comm.synchronize()
-        return losses
-
-    def _get_loss(self, data):
-        # How loss is calculated on train_loop
-        metrics_dict = self._model(data)
-        metrics_dict = {
-            k: v.detach().cpu().item() if isinstance(v, torch.Tensor) else float(v)
-            for k, v in metrics_dict.items()
-        }
-        total_losses_reduced = sum(loss for loss in metrics_dict.values())
-        return total_losses_reduced
-
-    def after_step(self):
-        next_iter = self.trainer.iter + 1
-        is_final = next_iter == self.trainer.max_iter
-        if is_final or (self._period > 0 and next_iter % self._period == 0):
-            self._do_loss_eval()
 
 class MyTrainer(DefaultTrainer):
-    def __init__(self, cfg, train_process):
+    def __init__(self, cfg, train_process=None):
         """
         Args:
             cfg (CfgNode):
@@ -157,22 +86,6 @@ class MyTrainer(DefaultTrainer):
     def build_evaluator(cfg, dataset_name):
         return MySemSegEvaluator(dataset_name, distributed=False, output_dir="eval", num_classes=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES )
 
-    def build_hooks(self):
-        hooks = super().build_hooks()
-        hooks.insert(-1, LossEvalHook(
-            self.cfg.TEST.EVAL_PERIOD,
-            self.model,
-            build_detection_test_loader(
-                self.cfg,
-                self.cfg.DATASETS.TEST[0],
-                MyMapper(False, augmentations=[T.Resize(self.cfg.INPUT_SIZE)], image_format="RGB")
-            ),
-            self,
-            self.train_process,
-            self.cfg.PATIENCE
-        ))
-        return hooks
-
     def build_writers(self):
         return []
 
@@ -190,7 +103,8 @@ class MyTrainer(DefaultTrainer):
                     self.before_step()
                     self.run_step()
                     self.after_step()
-                    self.train_process.emitStepProgress()
+                    if self.train_process is not None:
+                        self.train_process.emitStepProgress()
                 # self.iter == max_iter can be used by `after_train` to
                 # tell whether the training successfully finished or failed
                 # due to exceptions.
@@ -293,17 +207,16 @@ class MyMapper(DatasetMapper):
             return dataset_dict
         return dataset_dict
 
-def register_train_test(dataset_dict,metadata,train_ratio=0.66,seed=0):
+def register_train_test(dataset,train_ratio=0.66,seed=0):
     DatasetCatalog.clear()
     MetadataCatalog.clear()
-    nb_input= len(dataset_dict)
+    metadata = dataset["metadata"]
+    images = dataset["images"]
+    nb_input= len(images)
     x=np.arange(nb_input)
     random.Random(seed).shuffle(x)
     idx_split = int(len(x) * train_ratio)
-    DatasetCatalog.register("datasetTrain", my_dataset_function({"images":np.array(dataset_dict)[x[:idx_split]],"metadata":metadata}))
-    DatasetCatalog.register("datasetTest", my_dataset_function({"images":np.array(dataset_dict)[x[idx_split:]],"metadata":metadata}))
+    DatasetCatalog.register("datasetTrain", my_dataset_function({"images":np.array(images)[x[:idx_split]],"metadata":metadata}))
+    DatasetCatalog.register("datasetTest", my_dataset_function({"images":np.array(images)[x[idx_split:]],"metadata":metadata}))
     MetadataCatalog.get("datasetTrain").stuff_classes = [v for k,v in metadata["category_names"].items()]
     MetadataCatalog.get("datasetTest").stuff_classes = [v for k,v in metadata["category_names"].items()]
-
-    """if ignoreValue is not None:
-        MetadataCatalog.get("datasetTrain").ignore_label = ignoreValue"""

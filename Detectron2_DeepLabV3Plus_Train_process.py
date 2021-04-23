@@ -9,6 +9,10 @@ import os
 from detectron2.projects.deeplab import add_deeplab_config
 from detectron2.engine import launch
 import torch
+import json
+from subprocess import Popen,PIPE
+import sys
+import yaml
 # Your imports below
 
 # --------------------
@@ -74,7 +78,18 @@ class Detectron2_DeepLabV3Plus_TrainParam(dataprocess.CDnnTrainProcessParam):
         paramMap["learning_rate"] = str(self.learning_rate)
         return paramMap
 
+def training_function(cfg,imgs,meta,train_ratio):
+    print("ici3")
+    deeplabutils.register_train_test(imgs,meta,train_ratio=train_ratio)
+    print("ici3")
 
+    trainer = deeplabutils.MyTrainer(cfg)
+    print("ici3")
+
+    trainer.resume_or_load(resume=False)
+    print("Starting training job...")
+    trainer.train()
+    
 # --------------------
 # - Class which implements the process
 # - Inherits PyCore.CProtocolTask or derived from Ikomia API
@@ -91,32 +106,26 @@ class Detectron2_DeepLabV3Plus_TrainProcess(dnntrain.TrainProcess):
         else:
             self.setParam(copy.deepcopy(param))
 
-    def getProgressSteps(self, eltCount=1):
-        # Function returning the number of progress steps for this process
-        # This is handled by the main progress bar of Ikomia application
-        return 1
 
-    def run(self):
+    def run(self):       
+
         # Core function of your process
 
         input = self.getInput(0)
 
         # Get parameters :
         param = self.getParam()
-
         if len(input.data["images"])>0:
-
             param.epochs = int(param.maxIter / param.batch_size / len(input.data["images"]))
             param.classes = len(input.data["metadata"]["category_names"])
             param.model_name = "DeepLabV3Plus"
             # Call beginTaskRun for initialization
             self.beginTaskRun()
             self.log_param("Input size",str(param.inputSize))
-
             if param.expertModecfg == "":
                 # Get default config
                 cfg = get_cfg()
-
+    
                 # Add specific deeplab config
                 add_deeplab_config(cfg)
                 cfg.merge_from_file(os.path.dirname(os.path.realpath(__file__))+"/model/configs/deeplab_v3_plus_R_103_os16_mg124_poly_90k_bs16.yaml")
@@ -140,34 +149,48 @@ class Detectron2_DeepLabV3Plus_TrainProcess(dnntrain.TrainProcess):
                 cfg.SPLIT_TRAIN_TEST = param.splitTrainTest
                 cfg.SPLIT_TRAIN_TEST_SEED = -1
                 cfg.MODEL.BACKBONE.FREEZE_AT=5
-                if param.earlyStopping:
-                    cfg.PATIENCE = param.patience
-                else:
-                    cfg.PATIENCE = -1
-
-                cfg.OUTPUT_DIR = os.path.dirname(os.path.realpath(__file__))+"/output"
+                cfg.PATIENCE = -1
+                
+                ###ATTENTION CODE SIMPLIFIE IL MANQUE DES LIGNES    
+                
+                os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)   
+                
+            userpath = os.path.expanduser("~")
+            if sys.platform == "linux" or sys.platform == "darwin":
+                pythonpath = sys.executable
             else:
-                cfg = None
-                with open(param.expertModecfg, 'r') as file:
-                    cfg_data = file.read()
-                    cfg = CfgNode.load_cfg(cfg_data)
-            if cfg is not None:
-                deeplabutils.register_train_test(input.data["images"],input.data["metadata"],train_ratio=cfg.SPLIT_TRAIN_TEST/100,seed=cfg.SPLIT_TRAIN_TEST_SEED)
+                pythonpath = userpath + "/Ikomia/Python/Python.exe"
 
-                os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-
-                self.trainer = deeplabutils.MyTrainer(cfg,self)
-                self.trainer.resume_or_load(resume=False)
-                print("Starting training job...")
-                launch(self.trainer.train,num_gpus_per_machine=1)
-                print("Training job finished.")
-                print("Saving model pth...")
-                self.trainer.checkpointer.save("model_final")
-                print("Model saved")
-                with open(cfg.OUTPUT_DIR+"/Detectron2_DeepLabV3Plus_Train_Config.yaml", 'w') as file:
-                    file.write(cfg.dump())
-            else :
-                print("Error : can't load config file "+param.expertModecfg)
+            filepath= userpath + "/Ikomia/Plugins/Python/Detectron2_DeepLabV3Plus_Train/sub.py"
+            
+            images = json.dumps(input.data["images"])
+            metadata = json.dumps(input.data["metadata"])
+            split = str(param.splitTrainTest/100)
+            images_file = os.path.join(userpath,"Ikomia/Plugins/Python/Detectron2_DeepLabV3Plus_Train/images.json")
+            cfg_file = os.path.join(userpath,"Ikomia/Plugins/Python/Detectron2_DeepLabV3Plus_Train/cfg_param.yaml")
+            
+            with open(images_file, 'w') as fp:
+                json.dump(input.data, fp)            
+            with open(cfg_file,'w') as f:
+                f.write(cfg.dump())
+                
+            args = [cfg_file,images_file,split]
+            fout = open(userpath+"/OUT.txt",'w')
+            ferr = open(userpath+"/ERR.txt",'w')
+            p=Popen([pythonpath,filepath,*args], stdout=fout, stderr=ferr)
+                
+            
+            #while p.poll() is None:
+             #   data = p.stdout.readline() 
+              #  with open("OUT.txt",'a') as f:
+               #     f.write(data)
+                #data = p.stderr.readline() 
+                #with open("ERR.txt",'a') as f:
+                 #   f.write(data)
+            p.wait()
+            
+            
+            
         # Call endTaskRun to finalize process
         self.endTaskRun()
 
@@ -182,7 +205,7 @@ class Detectron2_DeepLabV3Plus_TrainProcess(dnntrain.TrainProcess):
 
     def stop(self):
         super().stop()
-        self.trainer.run=False
+        #self.trainer.run=False
 
 # --------------------
 # - Factory class to build process object
